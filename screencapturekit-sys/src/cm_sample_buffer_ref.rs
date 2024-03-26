@@ -40,7 +40,7 @@ impl CMSampleBufferRef {
         }
     }
 
-    pub fn get_av_audio_buffer_list(&self) -> Vec<CopiedAudioBuffer> {
+    pub fn get_av_audio_buffer_list(&self) -> Result<Vec<CopiedAudioBuffer>, &'static str> {
         unsafe {
             let mut buffer_size = 0;
             CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
@@ -75,35 +75,65 @@ impl CMSampleBufferRef {
 
             let audio_buffer_list_ptr = audio_buffer_list_ptr as *mut AudioBufferList;
 
-            let audio_buffers = self.copy_audio_buffers(audio_buffer_list_ptr);
+            let audio_buffers_result = self.copy_audio_buffers(audio_buffer_list_ptr);
 
-            alloc::dealloc(audio_buffer_list_ptr as *mut u8, layout);
-
-            audio_buffers
+            // audio_buffers_resultの結果に基づいて処理を行う
+            match audio_buffers_result {
+                Ok(audio_buffers) => {
+                    // 割り当てたメモリの解放
+                    alloc::dealloc(audio_buffer_list_ptr as *mut u8, layout);
+                    // 成功した場合はaudio_buffersを返す
+                    Ok(audio_buffers)
+                }
+                Err(error_message) => {
+                    // エラーが発生した場合はメッセージを含む結果を返す
+                    Err(error_message)
+                }
+            }
         }
     }
 
     fn copy_audio_buffers(
         &self,
-        audio_buffer_list_ptr: *mut AudioBufferList,
-    ) -> Vec<CopiedAudioBuffer> {
-        let audio_buffer_list = unsafe { *audio_buffer_list_ptr };
-        let number_buffers = audio_buffer_list.number_buffers;
+        audio_buffer_list_ptr: *const AudioBufferList,
+    ) -> Result<Vec<CopiedAudioBuffer>, &'static str> {
+        // ポインタが無効でないことを確認します。
+        if audio_buffer_list_ptr.is_null() {
+            return Err("audio_buffer_list_ptr is null");
+        }
+
+        // Unsafeブロックは必要最小限に留め、ポインタの内容を安全に操作します。
+        let audio_buffer_list = unsafe { &*audio_buffer_list_ptr };
         let mut buffers = Vec::new();
-        for i in 0..audio_buffer_list.number_buffers {
-            let audio_buffer = audio_buffer_list.buffers[i as usize];
+
+        // バッファの数だけループを実行し、各バッファの内容をコピーします。
+        for i in 0..audio_buffer_list.number_buffers as usize {
+            let audio_buffer = unsafe { audio_buffer_list.buffers.as_ptr().add(i).as_ref() }
+                .ok_or("Invalid buffer reference")?;
+
+            // audio_buffer.dataが無効なアドレスを指していないことを確認します。
+            if audio_buffer.data.is_null() {
+                return Err("Buffer data pointer is null");
+            }
+
+            // Validity of data_bytes_size is based on the context it is used.
+            // The application must ensure data_bytes_size is a valid size for the buffer.
+            let data_slice = unsafe {
+                std::slice::from_raw_parts(
+                    audio_buffer.data as *const u8,
+                    audio_buffer.data_bytes_size as usize,
+                )
+            };
+
             buffers.push(CopiedAudioBuffer {
-                number_channels: number_buffers,
-                data: unsafe {
-                    std::slice::from_raw_parts(
-                        audio_buffer.data,
-                        audio_buffer.data_bytes_size as usize,
-                    )
-                }
-                .to_vec(),
+                // number_channels should be assigned with the number of channels for each buffer.
+                // This should be obtained from appropriate field or context.
+                number_channels: audio_buffer.number_channels, // 前回のnumber_buffersは間違いとして修正
+                data: data_slice.to_vec(),
             });
         }
-        buffers
+
+        Ok(buffers)
     }
 
     pub fn get_image_buffer(&self) -> Option<ShareId<CVImageBufferRef>> {
